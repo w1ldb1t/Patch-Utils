@@ -1,0 +1,176 @@
+#!/bin/bash
+
+set -e
+
+# Function to check if we're in a git repository
+check_git_repo() {
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "Error: Not in a git repository"
+        exit 1
+    fi
+}
+
+# Function to get modified and untracked files
+get_modified_files() {
+    # Get modified files
+    modified=$(git ls-files -m)
+    # Get untracked files
+    untracked=$(git ls-files --others --exclude-standard)
+
+    if [[ -z "$modified" && -z "$untracked" ]]; then
+        echo "No modified or untracked files found"
+        exit 0
+    fi
+
+    echo -e "$modified\n$untracked" | grep -v '^$'
+}
+
+# Function to create patches
+create_patches() {
+    local patch_name="$1"
+    shift
+    local files=("$@")
+
+    # Create patches for modified files
+    for file in "${files[@]}"; do
+        if git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+            # File is tracked - use git diff
+            git diff "$file" >> "$patch_name" || {
+                echo "Error creating patch for modified file: $file"
+                return 1
+            }
+        else
+            # File is untracked - add to index temporarily
+            if [[ -f "$file" ]]; then
+                # Add file to index
+                git add "$file"
+
+                # Create patch using git diff
+                git diff --cached "$file" >> "$patch_name" || {
+                    echo "Error creating patch for untracked file: $file"
+                    # Remove from index to restore original state
+                    git reset HEAD "$file" >/dev/null
+                    return 1
+                }
+
+                # Remove from index to restore original state
+                git reset HEAD "$file" >/dev/null
+            else
+                echo "Warning: File not found: $file"
+            fi
+        fi
+    done
+
+    if [[ -f "$patch_name" && -s "$patch_name" ]]; then
+        echo "Patch created successfully: $patch_name"
+        return 0
+    else
+        echo "Error: Failed to create patch or patch is empty"
+        return 1
+    fi
+}
+
+# Main script
+main() {
+    # Check arguments
+    if [[ $# -ne 0 ]]; then
+        echo "Usage: $0"
+        echo "Creates patches for modified and untracked files"
+        exit 1
+    fi
+
+    # Check if we're in a git repository
+    check_git_repo
+
+    # Get list of files
+    mapfile -t files < <(get_modified_files)
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        exit 0
+    fi
+
+    # Check if whiptail is installed
+    if ! command -v whiptail >/dev/null 2>&1; then
+        echo "Error: whiptail is not installed"
+        exit 1
+    fi
+
+    # Create temporary file for whiptail output
+    temp_file=$(mktemp)
+    trap 'rm -f "$temp_file"' EXIT
+
+    # Prepare checklist items
+    checklist_items=()
+    for file in "${files[@]}"; do
+        # Check if file is modified or untracked
+        if git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+            status="Modified"
+        else
+            status="Untracked"
+        fi
+        checklist_items+=("$file" "$status" "OFF")
+    done
+
+    # Show whiptail dialog
+    whiptail --title "Select Files" \
+             --checklist "Choose files to include in patch:" \
+             20 78 15 \
+             "${checklist_items[@]}" \
+             2>"$temp_file"
+
+    if [ $? -ne 0 ]; then
+        echo "Operation cancelled"
+        exit 0
+    fi
+
+    # Read selected files
+    selected_text=$(cat "$temp_file")
+    if [ -z "$selected_text" ]; then
+        echo "No files selected"
+        exit 0
+    fi
+
+    # Convert the whiptail output into an array
+    eval "selected_files=($selected_text)"
+
+    if [[ ${#selected_files[@]} -eq 0 ]]; then
+        echo "No files selected"
+        exit 0
+    fi
+
+    # Ask for patch name
+    patch_name=$(whiptail --title "Patch Name" \
+                         --inputbox "Enter the name for the patch file:" \
+                         8 78 \
+                         "changes.patch" \
+                         3>&1 1>&2 2>&3)
+
+    if [[ $? -ne 0 || -z "$patch_name" ]]; then
+        echo "Operation cancelled"
+        exit 0
+    fi
+
+    # Add .patch extension if not present
+    [[ "$patch_name" != *.patch ]] && patch_name="${patch_name}.patch"
+
+    # Check if patch file already exists
+    if [[ -f "$patch_name" ]]; then
+        if ! whiptail --title "File Exists" \
+                     --yesno "File $patch_name already exists. Overwrite?" \
+                     8 78; then
+            echo "Operation cancelled"
+            exit 0
+        fi
+        # Remove existing patch file
+        rm -f "$patch_name"
+    fi
+
+    # Create patches
+    if ! create_patches "$patch_name" "${selected_files[@]}"; then
+        rm -f "$patch_name"
+        exit 1
+    fi
+}
+
+# Run main function
+main "$@"

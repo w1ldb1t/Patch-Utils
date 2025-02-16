@@ -1,0 +1,105 @@
+#!/bin/bash
+
+# Function to display usage information
+usage() {
+    echo "Usage: $0 <input_patch_file>"
+    echo "Splits a multi-patch file into individual patch files in the current directory."
+    exit 1
+}
+
+# Function to validate input
+validate_input() {
+    local input_file="$1"
+
+    # Check if input file is provided
+    if [ $# -ne 1 ]; then
+        echo "Error: Incorrect number of arguments."
+        usage
+    fi
+
+    # Check if input file exists
+    if [ ! -f "$input_file" ]; then
+        echo "Error: Input file '$input_file' does not exist."
+        exit 1
+    fi
+
+    # Check if input file is empty
+    if [ ! -s "$input_file" ]; then
+        echo "Error: Input file '$input_file' is empty."
+        exit 1
+    fi
+
+    # Check if current directory is writable
+    if [ ! -w . ]; then
+        echo "Error: Current directory is not writable."
+        exit 1
+    fi
+}
+
+# Function to split patches
+split_patches() {
+    local input_file="$1"
+    local output_dir="."
+
+    # Use awk to split the patches
+    awk -v output_dir="$output_dir" '
+    function sanitize_filename(filename) {
+        # Remove leading a/ or b/ from git patches
+        gsub(/^[ab]\//, "", filename)
+
+        # Replace problematic characters
+        gsub(/[\/\.]/, "_", filename)
+
+        return filename
+    }
+
+    /^diff --git a\// {
+        # Close previous file if open
+        if (file) close(file)
+
+        # Extract filename and sanitize it
+        filename = sanitize_filename($3)
+
+        # Create new filename
+        output_file = sprintf("%s/%s.patch", output_dir, filename)
+
+        # Print the filename being extracted
+        print "Extracting: " filename ".patch"
+
+        # Open file for writing
+        file = output_file
+
+        # Write the current diff header
+        print $0 > file
+        next
+    }
+
+    # Write content to current file
+    file {
+        print $0 > file
+    }
+
+    END {
+        # Close last file
+        if (file) close(file)
+    }
+    ' "$input_file"
+
+    # Check awk exit status
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to split patches. Check file permissions and disk space."
+        exit 1
+    fi
+}
+
+# Main script execution
+main() {
+    # Validate input arguments
+    validate_input "$@"
+
+    # Split patches
+    split_patches "$1"
+}
+
+# Call main function with all arguments
+main "$@"

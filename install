@@ -1,0 +1,20 @@
+#!/bin/bash
+
+scripts=("generate-patch" "split-patch" "update-patch")
+
+# Check that each script exists in the current directory
+for script in "${scripts[@]}"; do
+    if [[ ! -f "$script" ]]; then
+        echo "Error: $script not found in the current directory."
+        exit 1
+    fi
+done
+
+# Move to /usr/local/bin and set permissions
+for script in "${scripts[@]}"; do
+    sudo cp "$script" "/usr/local/bin/$script"
+    sudo chmod 755 "/usr/local/bin/$script"
+    echo "[+] $script => /usr/local/bin/$script"
+done
+
+echo "[*] Installation was successful!"

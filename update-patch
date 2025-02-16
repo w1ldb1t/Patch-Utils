@@ -1,0 +1,290 @@
+#!/bin/bash
+
+# Ensure lsdiff and whiptail are available
+for cmd in lsdiff whiptail; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "Error: $cmd is not installed."
+        exit 1
+    fi
+done
+
+# Function to print usage
+usage() {
+    echo "Usage: $0 <patch-file>"
+    exit 1
+}
+
+# Error checking for arguments
+if [ $# -ne 1 ]; then
+    echo "Error: Incorrect number of arguments."
+    usage
+fi
+
+# Check if the patch file exists and is readable
+if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+    echo "Error: Patch file does not exist or is not readable."
+    usage
+fi
+
+# Store the patch file path
+PATCH_FILE="$1"
+
+# Store the original git staged files before script execution
+original_staged_files=$(git diff --cached --name-only)
+
+# Trap to ensure cleanup happens even if script is interrupted
+cleanup() {
+    # Unstage any files that were not originally staged
+    git reset HEAD . > /dev/null 2>&1
+
+    # Restore originally staged files
+    for file in $original_staged_files; do
+        git restore --staged "$file" > /dev/null 2>&1
+    done
+}
+trap cleanup EXIT
+
+# Use lsdiff to extract files from the patch
+# Strip potential a/ or b/ prefixes
+mapfile -t raw_file_names < <(lsdiff "$PATCH_FILE" | sort -u)
+file_names=()
+for fname in "${raw_file_names[@]}"; do
+    # Remove a/ or b/ prefix if present
+    cleaned_fname=$(echo "$fname" | sed -E 's>^(a/|b/)>>g')
+    file_names+=("$cleaned_fname")
+done
+
+# Track files to be updated
+update_file_names=()
+
+# Function to get modified and untracked files
+get_modified_untracked_files() {
+    # Get modified and untracked files
+    local modified=$(git ls-files -m)
+    local untracked=$(git ls-files --others --exclude-standard)
+
+    # Combine and deduplicate
+    local all_files=()
+    mapfile -t all_files < <(printf '%s\n%s\n' "$modified" "$untracked" | sort -u | grep -v '^$')
+
+    # Prepare for whiptail checklist
+    local checklist_items=()
+    for file in "${all_files[@]}"; do
+        # Skip if the file is already in the patch
+        if [[ ! " ${file_names[@]} " =~ " ${file} " ]]; then
+            checklist_items+=("$file" "" "OFF")
+        fi
+    done
+
+    # If there are files, print the checklist items
+    if [ ${#checklist_items[@]} -gt 0 ]; then
+        printf '%s\n' "${checklist_items[@]}"
+    fi
+}
+
+# Main menu function
+main_menu() {
+    local choice
+    choice=$(whiptail --title "Patch Update Menu" --menu "Choose an option:" 15 60 4 \
+        "1" "Add Files to Patch" \
+        "2" "Remove Files from Patch" \
+        "3" "Update Existing Files" \
+        "4" "Finalize Patch" \
+        3>&1 1>&2 2>&3)
+
+    # Check the exit status of whiptail
+    local status=$?
+    if [[ $status -ne 0 ]]; then
+        # User pressed Cancel or closed the dialog
+        exit 0
+    fi
+
+    case $choice in
+        1)
+            # Get modified and untracked files
+            readarray -t files_array < <(get_modified_untracked_files)
+
+            # Show checklist if files exist
+            if [ ${#files_array[@]} -gt 0 ]; then
+                local selected_files
+                selected_files=$(whiptail --title "Select Files" --checklist \
+                    "Choose files to add to patch:" 15 60 7 \
+                    "${files_array[@]}" \
+                    3>&1 1>&2 2>&3)
+
+                # Check the exit status of whiptail
+                status=$?
+                if [[ $status -ne 0 ]]; then
+                    main_menu
+                    return
+                fi
+
+                # Add selected files to patch files
+                if [ -n "$selected_files" ]; then
+                    # Remove quotes from selected files
+                    selected_files=$(echo "$selected_files" | tr -d '"')
+                    for file in $selected_files; do
+                        if [[ ! " ${file_names[@]} " =~ " ${file} " ]]; then
+                            file_names+=("$file")
+                        fi
+                    done
+                    whiptail --msgbox "Files added successfully!" 8 45
+                fi
+            else
+                whiptail --msgbox "No modified or untracked files found." 8 45
+            fi
+            main_menu
+            ;;
+
+        2)
+            # Remove files from patch
+            if [ ${#file_names[@]} -gt 0 ]; then
+                local remove_items=()
+                for file in "${file_names[@]}"; do
+                    remove_items+=("$file" "" "OFF")
+                done
+
+                local files_to_remove
+                files_to_remove=$(whiptail --title "Remove Files" --checklist \
+                    "Choose files to remove from patch:" 15 60 7 \
+                    "${remove_items[@]}" \
+                    3>&1 1>&2 2>&3)
+
+                # Check the exit status of whiptail
+                status=$?
+                if [[ $status -ne 0 ]]; then
+                    main_menu
+                    return
+                fi
+
+                if [ -n "$files_to_remove" ]; then
+                    # Remove quotes from files_to_remove
+                    files_to_remove=$(echo "$files_to_remove" | tr -d '"')
+
+                    # Create a new array without removed files
+                    local new_file_names=()
+                    for file in "${file_names[@]}"; do
+                        if [[ ! " $files_to_remove " =~ " $file " ]]; then
+                            new_file_names+=("$file")
+                        fi
+                    done
+                    file_names=("${new_file_names[@]}")
+
+                    whiptail --msgbox "Files removed successfully!" 8 45
+                fi
+            else
+                whiptail --msgbox "No files in patch to remove." 8 45
+            fi
+            main_menu
+            ;;
+
+        3)
+            # Update existing files
+            if [ ${#file_names[@]} -gt 0 ]; then
+                local update_items=()
+                for file in "${file_names[@]}"; do
+                    update_items+=("$file" "" "OFF")
+                done
+
+                local files_to_update
+                files_to_update=$(whiptail --title "Update Files" --checklist \
+                    "Choose files to update in patch:" 15 60 7 \
+                    "${update_items[@]}" \
+                    3>&1 1>&2 2>&3)
+
+                # Check the exit status of whiptail
+                status=$?
+                if [[ $status -ne 0 ]]; then
+                    main_menu
+                    return
+                fi
+
+                if [ -n "$files_to_update" ]; then
+                    # Remove quotes from files_to_update
+                    files_to_update=$(echo "$files_to_update" | tr -d '"')
+
+                    # Reset update_file_names
+                    update_file_names=()
+
+                    # Populate update_file_names with selected files
+                    for file in $files_to_update; do
+                        update_file_names+=("$file")
+                    done
+
+                    whiptail --msgbox "Selected files will be updated to current version." 8 45
+                fi
+            else
+                whiptail --msgbox "No files in patch to update." 8 45
+            fi
+            main_menu
+            ;;
+
+        4)
+            # Finalize patch
+            return
+            ;;
+
+        *)
+            # Invalid option (this should now never happen)
+            whiptail --msgbox "Invalid option" 8 45
+            main_menu
+            ;;
+    esac
+}
+
+# Run the main menu
+main_menu
+
+# Create a temporary file to store the new patch
+TEMP_PATCH=$(mktemp)
+
+# Git add and create patch
+echo 'Generating updated patch file ...'
+
+# Get the original files in their precise order
+mapfile -t ordered_files < <(lsdiff "$PATCH_FILE" | sed -E 's>^(a/|b/)>>g')
+
+# Iterate through files in the original order
+for original_file in "${ordered_files[@]}"
+do
+   # Check if this file is still in our list of files
+   if [[ " ${file_names[@]} " =~ " ${original_file} " ]]; then
+       # Check if this file is in the update list
+       if [[ " ${update_file_names[@]} " =~ " ${original_file} " ]]; then
+           # add file to git cache
+           git add "$original_file" -f
+           # produce diff and append it to the temporary patch file
+           git diff --cached "$original_file" >> "$TEMP_PATCH"
+           # remove file from git cache
+           git rm --cached "$original_file" > /dev/null 2>&1
+       else
+           # For files not being updated, extract the original diff from the patch
+           awk -v file="$original_file" '
+           BEGIN {p=0; found=0}
+           /^diff --git / {
+               if (found) {exit}
+               if ($0 ~ file) {p=1; found=1; print; next}
+               if (p) {p=0}
+           }
+           p {print}
+           ' "$PATCH_FILE" >> "$TEMP_PATCH"
+       fi
+   fi
+done
+
+# Add any new files not in the original patch
+for new_file in "${file_names[@]}"
+do
+   if [[ ! " ${ordered_files[@]} " =~ " ${new_file} " ]]; then
+       # New file, generate a full diff
+       git add "$new_file" -f
+       git diff --cached "$new_file" >> "$TEMP_PATCH"
+       git rm --cached "$new_file" > /dev/null 2>&1
+   fi
+done
+
+# Replace the original patch file with the new one
+mv "$TEMP_PATCH" "$PATCH_FILE"
+
+# show success message
+whiptail --msgbox "Patch file $PATCH_FILE has been updated!" 8 45
